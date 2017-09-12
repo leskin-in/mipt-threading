@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <omp.h>
 #include <stdlib.h>
 #include <sys/time.h>
 #include <errno.h>
@@ -87,15 +86,12 @@ int main(int argc, char** argv) {
 		wandering_time = malloc(sizeof(unsigned long) * N);
 		wandering_result = malloc((size_t)N);
 		if ((wandering_time == NULL) ||
-				(wandering_result == NULL)) {
+			(wandering_result == NULL)) {
 			free(wandering_result);
 			free(wandering_time);
 			fprintf(stderr, "Malloc error\n");
 			return -1;
 		}
-		
-		// Prepare OpenMP
-		omp_set_num_threads(threads_total);
 	}
 	
 	// Calculations //
@@ -105,12 +101,10 @@ int main(int argc, char** argv) {
 		
 		struct drand48_data rand_seed;
 		double current_rand;
-
+		
 		
 		gettimeofday(&t_start, NULL);
 		
-		// OpenMP parallelized cycle
-		#pragma omp parallel for private(current_position, current_wandering_time, rand_seed, current_rand) shared(a, b, x_start, p_right, wandering_result, wandering_time, t_start)
 		for (i = 0; i < N; i++) {
 			current_position = x_start;
 			current_wandering_time = 0;
@@ -151,9 +145,9 @@ int main(int argc, char** argv) {
 		long double average_wandering_time = 0.0;
 		double p_experimental = 0.0;
 		double elapsed_time = ((double)t_end.tv_sec +
-				((double)t_end.tv_usec / 1000000.0) -
-				(double)t_start.tv_sec -
-				((double)t_start.tv_usec / 1000000.0));
+							   ((double)t_end.tv_usec / 1000000.0) -
+							   (double)t_start.tv_sec -
+							   ((double)t_start.tv_usec / 1000000.0));
 		
 		for (i = 0; i < N; i++) {
 			average_wandering_time += (long double)wandering_time[i];
@@ -163,7 +157,7 @@ int main(int argc, char** argv) {
 		}
 		average_wandering_time /= (long double)N;
 		p_experimental /= (double)N;
-
+		
 		FILE* o_stream = fopen("stats.txt", "a");
 		fprintf(o_stream, "%.4f %.1Lf %.3fs %s %s %s %s %s %s\n",
 				p_experimental, average_wandering_time, elapsed_time,
