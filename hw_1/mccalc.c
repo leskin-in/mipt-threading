@@ -1,7 +1,5 @@
 #include <stdio.h>
-#include <omp.h>
 #include <stdlib.h>
-#include <time.h>
 #include <sys/time.h>
 #include <errno.h>
 
@@ -94,9 +92,6 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "Malloc error\n");
 			return -1;
 		}
-		
-		// Prepare OpenMP
-		omp_set_num_threads(threads_total);
 	}
 	
 	// Calculations //
@@ -110,8 +105,6 @@ int main(int argc, char** argv) {
 		
 		gettimeofday(&t_start, NULL);
 		
-		// OpenMP parallelized cycle
-		#pragma omp parallel for private(current_position, current_wandering_time, rand_seed, current_rand) shared(a, b, x_start, p_right, wandering_result, wandering_time, t_start)
 		for (i = 0; i < N; i++) {
 			current_position = x_start;
 			current_wandering_time = 0;

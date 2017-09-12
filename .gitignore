@@ -1,0 +1,5 @@
+bin
+bin-debug
+CMakeLists.txt
+.idea
+
