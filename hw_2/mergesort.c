@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <omp.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <errno.h>
 
@@ -31,11 +32,11 @@ void print_help(void) {
 
 
 
-int int_comparator(const void *a, const void *b) {
-	if (a > b) {
+int int_comparator(const void *b, const void *a) {
+	if (a < b) {
 		return -1;
 	}
-	else if (a < b) {
+	else if (a > b) {
 		return 1;
 	}
 	else {
@@ -56,11 +57,12 @@ int main(int argc, char** argv) {
 	int *data;
 	int *data_sorted;
 	
-	int i;
 	struct timeval t_start;
 	struct timeval t_end;
 	
+	
 	// Prepare data //
+	
 	{
 		// Check argc
 		if (argc != 4) {
@@ -98,7 +100,7 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "Cannot open data file\n");
 			return -1;
 		}
-		for (i = 0; i < n; i++) {
+		for (int i = 0; i < n; i++) {
 			fscanf(i_stream, "%d", &(data[i]));
 		}
 		fclose(i_stream);
@@ -107,58 +109,57 @@ int main(int argc, char** argv) {
 		omp_set_num_threads(P);
 	}
 	
-	// Sorting //
+	
+	// Sort //
+	
 	{
-		int m_actual[P];
-		int start_pos[P];
+		int m_actual = ((n / P >= m) ? (m) : (n / P));
 		
-		// Define start positions and boundaries
-		start_pos[0] = 0;
-		m_actual[0] = n / P;
-		if (m_actual[0] >= m) {
-			m_actual[0] = m;
-			for (i = 1; i < P; i++) {
-				m_actual[i] = m_actual[0];
-				start_pos[i] = m_actual[0] * i;
-			}
+		int divisors_n;
+		// Use 1 extra chunk if there are some elements left after division
+		if (n % m_actual == 0) {
+			divisors_n = n / m_actual;
 		}
 		else {
-			int sum = m_actual[0];
-			for (i = 1; i < P; i++) {
-				m_actual[i] = m_actual[0];
-				start_pos[i] = m_actual[0] * i;
-				sum += m_actual[0];
-			}
-			if (sum < n) {
-				m_actual[P - 1] += (n - sum);
-			}
+			divisors_n = n / m_actual + 1;
 		}
+		divisors_n += 1;  // Add an extra divisor at the beginning
+		
+		int *divisors = malloc(sizeof(int) * divisors_n);
+		
+		divisors[0] = 0;
+		for (int i = 1; i < divisors_n - 1; i++) {
+			divisors[i] = divisors[i-1] + m_actual;
+		}
+		divisors[divisors_n - 1] = n;
+		
+		int chunk_step = 1;
+		
 		
 		gettimeofday(&t_start, NULL);
-
-		#pragma omp parallel
+		
+		// Note: all private variables are pointers. The data they point to is actually shared
+		#pragma omp parallel default(none) shared(divisors_n, chunk_step, P, data, data_sorted, divisors)
 		{
 			#pragma omp single
 			{
-				for (i = 0; i < P; i++) {
-					#pragma omp task shared(data, m_actual, n, P)
+				for (int i = 0; i < P; i++) {
+					#pragma omp task
 					{
-						int cpos = start_pos[omp_get_thread_num()];
-						int epos = cpos + m_actual[omp_get_thread_num()];
-						do {
-							if (cpos >= n) {
+						int thread_id = omp_get_thread_num();
+						int chunk_id;
+						
+						int j = 0;
+						while (1) {
+							chunk_id = thread_id + j * P;
+							j += 1;
+							if (chunk_id + 1 >= divisors_n) {
 								break;
 							}
-							else if (epos > n) {
-								epos = n;
-							}
-							
-							qsort(&(data[cpos]), (size_t)epos - cpos,
+							qsort(&(data[divisors[chunk_id]]),
+								  (size_t)divisors[chunk_id + 1] - divisors[chunk_id],
 								  sizeof(int), int_comparator);
-							
-							cpos += m_actual[omp_get_thread_num()] * P;
-							epos = cpos + m_actual[omp_get_thread_num()];
-						} while (1);
+						}
 					}
 				}
 			}
@@ -166,87 +167,73 @@ int main(int argc, char** argv) {
 			
 			#pragma omp single
 			{
-				int current_P = P;
-				int united_P = 1;
-				
-				int merge_starts[P];
-				int merge_ends[P];
-				
-				while (current_P > 0) {
-					if (current_P > 1) {
-						// FIXME: Sometimes P reduction should not be performed, but chunks should be merged
-						// Reduce the number of merge segments
-						current_P /= 2;
-						united_P *= 2;
-						
-						// Assing new merge starts and ends
-						merge_starts[0] = 0;
-						for (i = 0; i < current_P; i++) {
-							merge_ends[i] = merge_starts[i];
-							int j;
-							for (j = i * united_P; j < i * united_P + united_P; j++) {
-								if (j >= P) {
+				while (chunk_step < divisors_n - 1) {
+					for (int i = 0; i < P; i++) {
+						#pragma omp task
+						{
+							int thread_id = omp_get_thread_num();
+							int chunk_L_id;
+							int chunk_R_end_id;
+							
+							int dest_start;
+							int dest_end;
+							int dest_curr;
+							int src_L;
+							int src_end_L;
+							int src_R;
+							int src_end_R;
+							
+							int j = 0;
+							while (1) {
+								chunk_L_id = chunk_step * 2 * thread_id + chunk_step * 2 * P * j;
+								j += 1;
+								// If this chunk is the last one or invalid
+								if (chunk_L_id + 2 >= divisors_n) {
 									break;
 								}
- 								merge_ends[i] += m_actual[j];
-							}
-							if (i + 1 < current_P) {
-								merge_starts[i + 1] = merge_ends[i];
-							}
-						}
-						merge_ends[current_P - 1] = n;
-					}
-					else {
-						merge_starts[0] = 0;
-						merge_ends[0] = n;
-					}
-					
-					// Do merge sort
-					for (i = 0; i < current_P; i++) {
-						#pragma omp task shared(data, data_sorted, merge_starts, merge_ends)
-						{
-							int dest_start = merge_starts[omp_get_thread_num()];
-							int dest_end = merge_ends[omp_get_thread_num()];
-							int src_L = dest_start;
-							int src_end_L = (dest_start + dest_end) / 2;
-							int src_R = src_end_L;
-							int src_end_R = dest_end;
-							
-							int dest_curr = dest_start;
-							while (dest_curr < dest_end) {
-								if (src_R == src_end_R) {
-									data_sorted[dest_curr] = data[src_L];
-									src_L += 1;
+								chunk_R_end_id = chunk_L_id + chunk_step * 2;
+								if (chunk_R_end_id >= divisors_n) {
+									chunk_R_end_id = divisors_n - 1;
+								}
+								
+								dest_start = divisors[chunk_L_id];
+								dest_end = divisors[chunk_R_end_id];
+								dest_curr = dest_start;
+								
+								src_L = dest_start;
+								src_end_L = divisors[chunk_L_id + chunk_step];
+								src_R = src_end_L;
+								src_end_R = dest_end;
+								
+								while (dest_curr < dest_end) {
+									if (src_R == src_end_R) {
+										data_sorted[dest_curr] = data[src_L];
+										src_L += 1;
+									}
+									else if (src_L == src_end_L) {
+										data_sorted[dest_curr] = data[src_R];
+										src_R += 1;
+									}
+									else if (data[src_L] < data[src_R]) {
+										data_sorted[dest_curr] = data[src_L];
+										src_L += 1;
+									}
+									else {
+										data_sorted[dest_curr] = data[src_R];
+										src_R += 1;
+									}
 									dest_curr += 1;
 								}
-								else if (src_L == src_end_L) {
-									data_sorted[dest_curr] = data[src_R];
-									src_R += 1;
-									dest_curr += 1;
-								}
-								else if (data[src_L] < data[src_R]) {
-									data_sorted[dest_curr] = data[src_L];
-									src_L += 1;
-									dest_curr += 1;
-								}
-								else {
-									data_sorted[dest_curr] = data[src_R];
-									src_R += 1;
-									dest_curr += 1;
-								}
-							}
-							dest_curr = dest_start;
-							while (dest_curr < dest_end) {
-								data[dest_curr] = data_sorted[dest_curr];
-								dest_curr += 1;
+								
+								memcpy(&data[dest_start],
+									   &data_sorted[dest_start],
+									   sizeof(int) * (dest_end - dest_start));
 							}
 						}
 					}
 					#pragma omp taskwait
-					
-					if (current_P == 1) {
-						current_P = 0;
-					}
+
+					chunk_step *= 2;
 				}
 			}
 		}
@@ -254,7 +241,9 @@ int main(int argc, char** argv) {
 		gettimeofday(&t_end, NULL);
 	}
 	
+	
 	// Output //
+
 	{
 		double elapsed_time = ((double)t_end.tv_sec +
 				((double)t_end.tv_usec / 1000000.0) -
@@ -268,7 +257,7 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "Cannot open data file\n");
 		}
 		else {
-			for (i = 0; i < n; i++) {
+			for (int i = 0; i < n; i++) {
 				fprintf(o_stream, "%d ", data[i]);
 			}
 			fprintf(o_stream, "\n");
