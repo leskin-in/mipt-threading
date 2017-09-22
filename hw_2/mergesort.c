@@ -137,9 +137,9 @@ int main(int argc, char** argv) {
 		
 		
 		gettimeofday(&t_start, NULL);
-		
-		// Note: all private variables are pointers. The data they point to is actually shared
-		#pragma omp parallel default(none) shared(divisors_n, chunk_step, P, data, data_sorted, divisors)
+
+		#pragma omp barrier
+		#pragma omp parallel default(none) shared(divisors_n, P, data, divisors)
 		{
 			#pragma omp single
 			{
@@ -163,15 +163,24 @@ int main(int argc, char** argv) {
 					}
 				}
 			}
-			#pragma omp taskwait
-			
-			#pragma omp single
+		}
+		#pragma omp barrier
+		
+		
+		memcpy(data_sorted, data, sizeof(int) * n);
+		#pragma omp barrier
+		
+		while (chunk_step < divisors_n - 1) {
+			#pragma omp barrier
+			#pragma omp parallel default(none) shared(divisors_n, chunk_step, P, data, data_sorted, divisors)
 			{
-				while (chunk_step < divisors_n - 1) {
+				#pragma omp single
+				{
 					for (int i = 0; i < P; i++) {
 						#pragma omp task
 						{
 							int thread_id = omp_get_thread_num();
+							
 							int chunk_L_id;
 							int chunk_R_end_id;
 							
@@ -185,7 +194,8 @@ int main(int argc, char** argv) {
 							
 							int j = 0;
 							while (1) {
-								chunk_L_id = chunk_step * 2 * thread_id + chunk_step * 2 * P * j;
+								chunk_L_id = chunk_step * 2 * thread_id +
+											 chunk_step * 2 * P * j;
 								j += 1;
 								// If this chunk is the last one or invalid
 								if (chunk_L_id + 2 >= divisors_n) {
@@ -224,23 +234,23 @@ int main(int argc, char** argv) {
 									}
 									dest_curr += 1;
 								}
-								
-								memcpy(&data[dest_start],
-									   &data_sorted[dest_start],
-									   sizeof(int) * (dest_end - dest_start));
 							}
 						}
 					}
-					#pragma omp taskwait
-
-					chunk_step *= 2;
 				}
 			}
+			
+			#pragma omp barrier
+			#pragma omp single
+			{
+				chunk_step *= 2;
+				memcpy(data, data_sorted, sizeof(int) * n);
+			}
+			#pragma omp barrier
 		}
 		
 		gettimeofday(&t_end, NULL);
 	}
-	
 	
 	// Output //
 
