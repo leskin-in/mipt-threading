@@ -32,11 +32,13 @@ void print_help(void) {
 
 
 
-int int_comparator(const void *b, const void *a) {
-	if (a < b) {
+int int_comparator(const void *a, const void *b) {
+	int element_a = *((int*)a);
+	int element_b = *((int*)b);
+	if (element_a < element_b) {
 		return -1;
 	}
-	else if (a > b) {
+	else if (element_a > element_b) {
 		return 1;
 	}
 	else {
@@ -101,7 +103,12 @@ int main(int argc, char** argv) {
 			return -1;
 		}
 		for (int i = 0; i < n; i++) {
-			fscanf(i_stream, "%d", &(data[i]));
+			if (fscanf(i_stream, "%d", &(data[i])) == EOF) {
+				free(data);
+				free(data_sorted);
+				fprintf(stderr, "Incorrect file content\n");
+				return -1;
+			}
 		}
 		fclose(i_stream);
 		
@@ -126,6 +133,12 @@ int main(int argc, char** argv) {
 		divisors_n += 1;  // Add an extra divisor at the beginning
 		
 		int *divisors = malloc(sizeof(int) * divisors_n);
+		if (divisors == NULL) {
+			free(data);
+			free(data_sorted);
+			fprintf(stderr, "Malloc error\n");
+			return -1;
+		}
 		
 		divisors[0] = 0;
 		for (int i = 1; i < divisors_n - 1; i++) {
@@ -138,101 +151,147 @@ int main(int argc, char** argv) {
 		
 		gettimeofday(&t_start, NULL);
 
-		#pragma omp barrier
 		#pragma omp parallel default(none) shared(divisors_n, P, data, divisors)
 		{
-			#pragma omp single
+			#pragma omp single nowait
 			{
-				for (int i = 0; i < P; i++) {
-					#pragma omp task
-					{
-						int thread_id = omp_get_thread_num();
-						int chunk_id;
-						
-						int j = 0;
-						while (1) {
-							chunk_id = thread_id + j * P;
-							j += 1;
-							if (chunk_id + 1 >= divisors_n) {
-								break;
-							}
-							qsort(&(data[divisors[chunk_id]]),
-								  (size_t)divisors[chunk_id + 1] - divisors[chunk_id],
-								  sizeof(int), int_comparator);
-						}
-					}
-				}
-			}
-		}
-		#pragma omp barrier
-		
-		
-		memcpy(data_sorted, data, sizeof(int) * n);
-		#pragma omp barrier
-		
-		while (chunk_step < divisors_n - 1) {
-			#pragma omp barrier
-			#pragma omp parallel default(none) shared(divisors_n, chunk_step, P, data, data_sorted, divisors)
-			{
-				#pragma omp single
+				#pragma omp taskgroup
 				{
 					for (int i = 0; i < P; i++) {
 						#pragma omp task
 						{
 							int thread_id = omp_get_thread_num();
-							
-							int chunk_L_id;
-							int chunk_R_end_id;
-							
-							int dest_start;
-							int dest_end;
-							int dest_curr;
-							int src_L;
-							int src_end_L;
-							int src_R;
-							int src_end_R;
+							int chunk_id;
 							
 							int j = 0;
 							while (1) {
-								chunk_L_id = chunk_step * 2 * thread_id +
-											 chunk_step * 2 * P * j;
+								chunk_id = thread_id + j * P;
 								j += 1;
-								// If this chunk is the last one or invalid
-								if (chunk_L_id + 2 >= divisors_n) {
+								if (chunk_id + 1 >= divisors_n) {
 									break;
 								}
-								chunk_R_end_id = chunk_L_id + chunk_step * 2;
-								if (chunk_R_end_id >= divisors_n) {
-									chunk_R_end_id = divisors_n - 1;
-								}
+								qsort(&(data[divisors[chunk_id]]),
+									  (size_t) divisors[chunk_id + 1] -
+									  divisors[chunk_id],
+									  sizeof(int), int_comparator);
+							}
+						}
+					}
+				}
+			}
+		}
+		
+		
+		memcpy(data_sorted, data, sizeof(int) * n);
+		
+		while (chunk_step < divisors_n - 1) {
+			#pragma omp parallel default(none) shared(divisors_n, chunk_step, P, data, data_sorted, divisors)
+			{
+				#pragma omp single nowait
+				{
+					#pragma omp taskgroup
+					{
+						for (int i = 0; i < P; i++) {
+							#pragma omp task
+							{
+								int thread_id = omp_get_thread_num();
 								
-								dest_start = divisors[chunk_L_id];
-								dest_end = divisors[chunk_R_end_id];
-								dest_curr = dest_start;
+								int chunk_L_id;
+								int chunk_R_end_id;
 								
-								src_L = dest_start;
-								src_end_L = divisors[chunk_L_id + chunk_step];
-								src_R = src_end_L;
-								src_end_R = dest_end;
+								int dest_start;
+								int dest_end;
+								int dest_curr;
+								int src_L;
+								int src_end_L;
+								int src_R;
+								int src_end_R;
 								
-								while (dest_curr < dest_end) {
-									if (src_R == src_end_R) {
-										data_sorted[dest_curr] = data[src_L];
-										src_L += 1;
-									}
-									else if (src_L == src_end_L) {
-										data_sorted[dest_curr] = data[src_R];
-										src_R += 1;
-									}
-									else if (data[src_L] < data[src_R]) {
-										data_sorted[dest_curr] = data[src_L];
-										src_L += 1;
+								int req_processing_last_chunk = 0;
+								
+								int j = 0;
+								while (1) {
+									if (req_processing_last_chunk == 0) {
+										chunk_L_id =
+												chunk_step * 2 * thread_id +
+												chunk_step * 2 * P * j;
 									}
 									else {
-										data_sorted[dest_curr] = data[src_R];
-										src_R += 1;
+										// Use from previous iteration
+										chunk_L_id =
+												chunk_step * 2 * thread_id +
+												chunk_step * 2 * P * (j - 1);
 									}
-									dest_curr += 1;
+									j += 1;
+									
+									// If this chunk is the last one or invalid
+									if ((chunk_L_id + 2 >= divisors_n) ||
+										(chunk_L_id < 0)) {
+										break;
+									}
+									
+									dest_start = divisors[chunk_L_id];
+									
+									if (req_processing_last_chunk == 0) {
+										chunk_R_end_id =
+												chunk_L_id + chunk_step * 2;
+										if (chunk_R_end_id >= divisors_n) {
+											chunk_R_end_id = divisors_n - 1;
+										}
+									}
+									else {
+										chunk_R_end_id = divisors_n - 1;
+									}
+									dest_end = divisors[chunk_R_end_id];
+									
+									dest_curr = dest_start;
+									
+									src_L = dest_start;
+									
+									if (req_processing_last_chunk == 0) {
+										src_end_L = divisors[chunk_L_id +
+															 chunk_step];
+									}
+									else {
+										// Use chunk_R_end_id for previous iteration
+										src_end_L = divisors[chunk_L_id +
+															 chunk_step * 2];
+									}
+									src_R = src_end_L;
+									src_end_R = dest_end;
+									
+									while (dest_curr < dest_end) {
+										if (src_R == src_end_R) {
+											data_sorted[dest_curr] = data[src_L];
+											src_L += 1;
+										}
+										else if (src_L == src_end_L) {
+											data_sorted[dest_curr] = data[src_R];
+											src_R += 1;
+										}
+										else if (data[src_L] < data[src_R]) {
+											data_sorted[dest_curr] = data[src_L];
+											src_L += 1;
+										}
+										else {
+											data_sorted[dest_curr] = data[src_R];
+											src_R += 1;
+										}
+										dest_curr += 1;
+									}
+									
+									if (req_processing_last_chunk == 1) {
+										break;
+									}
+									if ((chunk_R_end_id + chunk_step + 1 >=
+										 divisors_n) &&
+										(chunk_R_end_id + 1 < divisors_n)) {
+										memcpy(&data[dest_start],
+											   &data_sorted[dest_start],
+											   sizeof(int) *
+											   (dest_end - dest_start));
+										req_processing_last_chunk = 1;
+									}
 								}
 							}
 						}
@@ -240,16 +299,13 @@ int main(int argc, char** argv) {
 				}
 			}
 			
-			#pragma omp barrier
-			#pragma omp single
-			{
-				chunk_step *= 2;
-				memcpy(data, data_sorted, sizeof(int) * n);
-			}
-			#pragma omp barrier
+			chunk_step *= 2;
+			memcpy(data, data_sorted, sizeof(int) * n);
 		}
 		
 		gettimeofday(&t_end, NULL);
+		
+		free(divisors);
 	}
 	
 	// Output //
