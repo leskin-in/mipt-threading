@@ -227,6 +227,7 @@ void* chunk_merge_thread(void* params) {
 		}
 	}
 	
+	free(data_sorted);
 	return NULL;
 }
 
