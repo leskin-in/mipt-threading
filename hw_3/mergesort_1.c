@@ -158,15 +158,28 @@ void* chunk_merge_thread(void* params) {
 		src_L = dest_start;
 		
 		if (req_processing_last_chunk == 0) {
-			src_end_L = divisors[chunk_L_id +
-								 chunk_step_l];
+			if (chunk_L_id + chunk_step_l > divisors_n) {
+				src_end_L = divisors[divisors_n - 1];
+			}
+			else {
+				src_end_L = divisors[chunk_L_id +
+									 chunk_step_l];
+			}
+			
 		}
 		else {
-			// Use chunk_R_end_id for previous iteration
-			src_end_L = divisors[chunk_L_id +
-								 chunk_step_l * 2];
+			if (chunk_L_id + chunk_step_l > divisors_n) {
+				src_end_L = divisors[divisors_n - 1];
+			}
+			else {
+				// Use chunk_R_end_id for previous iteration
+				src_end_L = divisors[chunk_L_id +
+									 chunk_step_l * 2];
+			}
 		}
+		
 		src_R = src_end_L;
+		
 		src_end_R = dest_end;
 		
 		while (dest_curr < dest_end) {
