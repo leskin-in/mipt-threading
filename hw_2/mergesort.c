@@ -116,9 +116,9 @@ int main(int argc, char** argv) {
 		omp_set_num_threads(P);
 	}
 	
-	
 	// Sort //
 	
+	gettimeofday(&t_start, NULL);
 	{
 		int m_actual = ((n / P >= m) ? (m) : (n / P));
 		
@@ -145,153 +145,110 @@ int main(int argc, char** argv) {
 			divisors[i] = divisors[i-1] + m_actual;
 		}
 		divisors[divisors_n - 1] = n;
-		
-		int chunk_step = 1;
-		
-		
-		gettimeofday(&t_start, NULL);
 
-		#pragma omp parallel default(none) shared(divisors_n, P, data, divisors)
+		// Perform qsort on each chunk
+		#pragma omp parallel default(none) shared(divisors_n, data, divisors)
 		{
-			#pragma omp single nowait
-			{
-				#pragma omp taskgroup
+			for (int i = 0; i < divisors_n - 1; i++) {
+				#pragma omp single nowait
 				{
-					for (int i = 0; i < P; i++) {
-						#pragma omp task
-						{
-							int thread_id = omp_get_thread_num();
-							int chunk_id;
-							
-							int j = 0;
-							while (1) {
-								chunk_id = thread_id + j * P;
-								j += 1;
-								if (chunk_id + 1 >= divisors_n) {
-									break;
-								}
-								qsort(&(data[divisors[chunk_id]]),
-									  (size_t) divisors[chunk_id + 1] -
-									  divisors[chunk_id],
-									  sizeof(int), int_comparator);
-							}
-						}
+					#pragma omp task
+					{
+						qsort(&data[divisors[i]],
+							  (size_t) divisors[i + 1] - divisors[i],
+							  sizeof(int),
+							  int_comparator);
 					}
 				}
 			}
 		}
 		
-		
+		// Protect data_sorted
 		memcpy(data_sorted, data, sizeof(int) * n);
+		int chunk_step = 1;
 		
+		// Do chunk merge and then increase 'chunk_step' (no. of merged chunks)
 		while (chunk_step < divisors_n - 1) {
-			#pragma omp parallel default(none) shared(divisors_n, chunk_step, P, data, data_sorted, divisors)
+			#pragma omp parallel default(none) shared(chunk_step, divisors_n, divisors, data, data_sorted)
 			{
-				#pragma omp single nowait
-				{
-					#pragma omp taskgroup
+				for (int i = 0; i < divisors_n - chunk_step - 1; i += (chunk_step * 2)) {
+					#pragma omp single nowait
 					{
-						for (int i = 0; i < P; i++) {
-							#pragma omp task
-							{
-								int thread_id = omp_get_thread_num();
-								
-								int chunk_L_id;
-								int chunk_R_end_id;
-								
-								int dest_start;
-								int dest_end;
-								int dest_curr;
-								int src_L;
-								int src_end_L;
-								int src_R;
-								int src_end_R;
-								
-								int req_processing_last_chunk = 0;
-								
-								int j = 0;
-								while (1) {
-									if (req_processing_last_chunk == 0) {
-										chunk_L_id =
-												chunk_step * 2 * thread_id +
-												chunk_step * 2 * P * j;
-									}
-									else {
-										// Use from previous iteration
-										chunk_L_id =
-												chunk_step * 2 * thread_id +
-												chunk_step * 2 * P * (j - 1);
-									}
-									j += 1;
-									
-									// If this chunk is the last one or invalid
-									if ((chunk_L_id + 2 >= divisors_n) ||
-										(chunk_L_id < 0)) {
-										break;
-									}
-									
-									dest_start = divisors[chunk_L_id];
-									
-									if (req_processing_last_chunk == 0) {
-										chunk_R_end_id =
-												chunk_L_id + chunk_step * 2;
-										if (chunk_R_end_id >= divisors_n) {
-											chunk_R_end_id = divisors_n - 1;
-										}
-									}
-									else {
+						#pragma omp task
+						{
+							int chunk_L_id = i;
+							int chunk_R_end_id;
+							
+							int dest_start;
+							int dest_end;
+							int dest_curr;
+							int src_L;
+							int src_end_L;
+							int src_R;
+							int src_end_R;
+							
+							int req_processing_last_chunk = 0;
+							while (1) {
+								if (req_processing_last_chunk == 0) {
+									chunk_R_end_id = chunk_L_id + chunk_step * 2;
+									if (chunk_R_end_id >= divisors_n) {
 										chunk_R_end_id = divisors_n - 1;
 									}
-									dest_end = divisors[chunk_R_end_id];
-									
-									dest_curr = dest_start;
-									
-									src_L = dest_start;
-									
-									if (req_processing_last_chunk == 0) {
-										src_end_L = divisors[chunk_L_id +
-															 chunk_step];
+								}
+								else {
+									chunk_R_end_id = divisors_n - 1;
+								}
+								
+								dest_start = divisors[chunk_L_id];
+								dest_end = divisors[chunk_R_end_id];
+								
+								if (req_processing_last_chunk == 0) {
+									src_end_L = divisors[chunk_L_id + chunk_step];
+								}
+								else {
+									src_end_L = divisors[chunk_L_id + chunk_step * 2];
+								}
+								
+								src_end_R = dest_end;
+								
+								src_L = dest_start;
+								src_R = src_end_L;
+								
+								dest_curr = dest_start;
+								
+								while (dest_curr < dest_end) {
+									if (src_R == src_end_R) {
+										data_sorted[dest_curr] = data[src_L];
+										src_L += 1;
+									}
+									else if (src_L == src_end_L) {
+										data_sorted[dest_curr] = data[src_R];
+										src_R += 1;
+									}
+									else if (data[src_L] < data[src_R]) {
+										data_sorted[dest_curr] = data[src_L];
+										src_L += 1;
 									}
 									else {
-										// Use chunk_R_end_id for previous iteration
-										src_end_L = divisors[chunk_L_id +
-															 chunk_step * 2];
+										data_sorted[dest_curr] = data[src_R];
+										src_R += 1;
 									}
-									src_R = src_end_L;
-									src_end_R = dest_end;
-									
-									while (dest_curr < dest_end) {
-										if (src_R == src_end_R) {
-											data_sorted[dest_curr] = data[src_L];
-											src_L += 1;
-										}
-										else if (src_L == src_end_L) {
-											data_sorted[dest_curr] = data[src_R];
-											src_R += 1;
-										}
-										else if (data[src_L] < data[src_R]) {
-											data_sorted[dest_curr] = data[src_L];
-											src_L += 1;
-										}
-										else {
-											data_sorted[dest_curr] = data[src_R];
-											src_R += 1;
-										}
-										dest_curr += 1;
-									}
-									
-									if (req_processing_last_chunk == 1) {
-										break;
-									}
-									if ((chunk_R_end_id + chunk_step + 1 >=
-										 divisors_n) &&
-										(chunk_R_end_id + 1 < divisors_n)) {
-										memcpy(&data[dest_start],
-											   &data_sorted[dest_start],
-											   sizeof(int) *
-											   (dest_end - dest_start));
-										req_processing_last_chunk = 1;
-									}
+									dest_curr += 1;
+								}
+								
+								if (req_processing_last_chunk == 1) {
+									break;
+								}
+								
+								if ((chunk_R_end_id + chunk_step + 1 >= divisors_n) &&
+									(chunk_R_end_id + 1 < divisors_n)) {
+									memcpy(&data[dest_start],
+										   &data_sorted[dest_start],
+										   sizeof(int) * (dest_end - dest_start));
+									req_processing_last_chunk = 1;
+								}
+								else {
+									break;
 								}
 							}
 						}
@@ -303,10 +260,9 @@ int main(int argc, char** argv) {
 			memcpy(data, data_sorted, sizeof(int) * n);
 		}
 		
-		gettimeofday(&t_end, NULL);
-		
 		free(divisors);
 	}
+	gettimeofday(&t_end, NULL);
 	
 	// Output //
 
