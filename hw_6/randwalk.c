@@ -21,10 +21,16 @@ typedef struct particle_t {
 	long steps_to_live;
 } PARTICLE;
 
-/// Message buffer (for internal communications) for particle
+/// Message buffer (for internal communications) for particles
 struct msgbuf_particle {
 	long type;
 	PARTICLE particle;
+};
+
+/// Message buffer (for internal communications) for random numbers
+struct msgbuf_lrand {
+	long type;
+	long number;
 };
 
 
@@ -39,22 +45,39 @@ const double DOUBLE_ERROR = 1e-7;
 /// Interval (in ticks) at which the receive operation is performed
 const int RECEIVE_TICK_INTERVAL = 64;
 
+const int QUEUE_RAND_NORMAL_LENGTH = 512;
+
+
 int mpi_size;
 
 int mpi_rank;
 
+
 /// Global MPI_Datatype for the PARTICLE struct
 MPI_Datatype PARTICLE_mpi_t;
+
 
 /// System V queue ID for the sender thread
 int qid_send;
 
 pthread_t thread_sender_tid;
 
+
 /// System V queue ID for the receiver thread
 int qid_receive;
 
 pthread_t thread_receiver_tid;
+
+
+/// System V queue ID for the random supplier thread
+int qid_rand_supply;
+
+pthread_t thread_rand_supplier_tid;
+
+pthread_mutex_t thread_rand_supplier_status_lock;
+/// Indicator of status of 'thread_rand_supplier'
+int thread_rand_supplier_status;
+
 
 /// System V message type and IPC tag: normal message
 #define CLASSIFIER_NORM 0
@@ -381,7 +404,31 @@ void* thread_rand_supplier(void* context) {
 		}
 	}
 	
+	struct msqid_ds qid_rand_supply_info;
+	struct msgbuf_lrand buffer;
+	buffer.type = CLASSIFIER_NORM;
 	
+	srand48((long)time(NULL));
+	
+	while (1) {
+		pthread_mutex_lock(&thread_rand_supplier_status_lock);
+		if (thread_rand_supplier_status == -1) {
+			thread_rand_supplier_status = 1;
+			pthread_mutex_unlock(&thread_rand_supplier_status_lock);
+			break;
+		}
+		pthread_mutex_unlock(&thread_rand_supplier_status_lock);
+		
+		msgctl(qid_rand_supply, IPC_STAT, &qid_rand_supply_info);
+		for (int i = 0;
+			 i < QUEUE_RAND_NORMAL_LENGTH - qid_rand_supply_info.msg_qnum;
+			 i++) {
+			buffer.number = lrand48();
+			msgsnd(qid_rand_supply, &buffer, sizeof(struct msgbuf_lrand), 0);
+		}
+	}
+	
+	return NULL;
 }
 
 
@@ -459,6 +506,13 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "Send message queue cannot be created\n");
 			return -1;
 		}
+		if ((qid_rand_supply = msgget(IPC_PRIVATE, 0666)) < 0) {
+			fprintf(stderr, "Rand supply message queue cannot be created\n");
+			return -1;
+		}
+		
+		thread_rand_supplier_status = 0;
+		thread_rand_supplier_status_lock = PTHREAD_MUTEX_INITIALIZER;
 		
 		if (pthread_create(&thread_receiver_tid, NULL,
 						   thread_receiver, NULL) < 0) {
@@ -468,6 +522,11 @@ int main(int argc, char** argv) {
 		if (pthread_create(&thread_sender_tid, NULL,
 						   thread_sender, NULL) < 0) {
 			fprintf(stderr, "Sender cannot be launched\n");
+			return -1;
+		}
+		if (pthread_create(&thread_rand_supplier_tid, NULL,
+						   thread_rand_supplier, NULL) < 0) {
+			fprintf(stderr, "Rand supplier cannot be launched\n");
 			return -1;
 		}
 	}
@@ -497,16 +556,43 @@ int main(int argc, char** argv) {
 	
 	
 	// Run main cycle of the program //
-	int tick = 0;
-	while (1) {
-		tick = (tick + 1) % RECEIVE_TICK_INTERVAL;
+	{
+		struct msgbuf_lrand lrand_buffer;
+		struct msgbuf_particle particle_buffer;
 		
-		if (tick == 0) {
-			// Receive particles
+		/// If set to nonzero, then main() should cease operations
+		int stop_flag = 0;
+		
+		int tick = 0;
+		while (stop_flag == 0) {
+			tick = (tick + 1) % RECEIVE_TICK_INTERVAL;
+			
+			if (tick == 0) {
+				// Receive all messages in the queue
+				
+				while (msgrcv(qid_receive, &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0, IPC_NOWAIT) >= 0) {
+					if (particle_buffer.type == CLASSIFIER_STOP) {
+						stop_flag = 1;
+						break;
+					}
+					
+					depot_add(&particle_buffer.particle);
+				}
+				
+				// Remove ENOMSG error
+				errno = 0;
+			}
+			
+			if (depot_a_length == 0) {
+				// Require an immediate particle receive
+				tick = -1;
+				continue;
+			}
+			
+			for (int i = 0; i < depot_a_length; i++) {
+				// Process particles
+			}
 		}
-		
-		
-		break;
 	}
 	
 	MPI_Finalize();
