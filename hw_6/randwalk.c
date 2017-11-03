@@ -241,9 +241,6 @@ long get_sector_with_offset(const PARTICLE* unit, long current_sector) {
 int depot_add(const PARTICLE* unit) {
 	depot_a_length += 1;
 	depot_a = realloc(depot_a, depot_a_length * sizeof(PARTICLE));
-	if (errno != 0) {
-		return -1;
-	}
 	depot_a[depot_a_length - 1] = *unit;
 	return 0;
 }
@@ -278,9 +275,6 @@ int depot_die(int depot_a_id) {
 	}
 	depot_d_length += 1;
 	depot_d = realloc(depot_d, depot_d_length * sizeof(PARTICLE));
-	if (errno != 0) {
-		return -1;
-	}
 	depot_d[depot_d_length - 1] = depot_a[depot_a_id];
 	depot_remove(depot_a_id);
 	return 0;
@@ -390,9 +384,18 @@ void* thread_receiver(void* context) {
 
 int main(int argc, char** argv) {
 	// Initialize MPI //
-	MPI_Init(&argc, &argv);
-	MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
-	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+	{
+		int mpi_thread_env_provided;
+		MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &mpi_thread_env_provided);
+		if ((mpi_thread_env_provided != MPI_THREAD_MULTIPLE) &&
+				(mpi_thread_env_provided != MPI_THREAD_SERIALIZED)) {
+			fprintf(stderr, "This program requires more pthread privileges\n");
+			return -1;
+		}
+		
+		MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+		MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+	}
 	
 	
 	// Read arguments and initialize key variables //
@@ -409,21 +412,23 @@ int main(int argc, char** argv) {
 		b = strtol(argv[3], NULL, 10);
 		n = strtol(argv[4], NULL, 10);
 		N = strtol(argv[5], NULL, 10);
+		
 		N_dead = 0;
 		p_left = strtod(argv[6], NULL);
 		p_right = strtod(argv[7], NULL);
 		p_up = strtod(argv[8], NULL);
 		p_down = strtod(argv[9], NULL);
 		
+		// FIXME: errno is changed by some MPI routines and becomes incorrect
 		// Check conversions
-		if (errno != 0) {
-			print_help();
-			return -1;
-		}
+//		if (errno != 0) {
+//			fprintf(stderr, "Invalid arguments\n");
+//			print_help();
+//			return -1;
+//		}
 		
 		if (a * b != mpi_size) {
 			fprintf(stderr, "A number of MPI units is incorrect\n");
-			print_help();
 			return -1;
 		}
 		
@@ -490,6 +495,11 @@ int main(int argc, char** argv) {
 		}
 	}
 	
+	MPI_Barrier(MPI_COMM_WORLD);
+	if (mpi_rank == MPI_MASTER_RANK) {
+		printf("PREPARE: Particles setup\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
 	
 	// Prepare particles of this sector //
 	{
@@ -500,6 +510,13 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "malloc() / realloc() error\n");
 			return -1;
 		}
+		
+		MPI_Barrier(MPI_COMM_WORLD);
+		if (mpi_rank == MPI_MASTER_RANK) {
+			printf("PROGRESS: Particles setup\n");
+		}
+		MPI_Barrier(MPI_COMM_WORLD);
+		
 		for (int i = 0; i < N; i++) {
 			depot_a[i].origin_sector = mpi_rank;
 			depot_a[i].steps_to_live = n;
@@ -513,6 +530,11 @@ int main(int argc, char** argv) {
 		depot_d = NULL;
 	}
 	
+	MPI_Barrier(MPI_COMM_WORLD);
+	if (mpi_rank == MPI_MASTER_RANK) {
+		printf("COMPLETE: Particles setup\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
 	
 	// Run main cycle of the program //
 	{
@@ -613,6 +635,12 @@ int main(int argc, char** argv) {
 					}
 				}
 			}
+			
+			MPI_Barrier(MPI_COMM_WORLD);
+			if (mpi_rank == MPI_MASTER_RANK) {
+				printf("Iteration...\n");
+			}
+			MPI_Barrier(MPI_COMM_WORLD);
 		}
 		
 		// Check 'depot_a'
@@ -621,6 +649,11 @@ int main(int argc, char** argv) {
 		}
 	}
 	
+	MPI_Barrier(MPI_COMM_WORLD);
+	if (mpi_rank == MPI_MASTER_RANK) {
+		printf("COMPLETE: Main cycle\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
 	
 	// Completion actions //
 	{
@@ -648,7 +681,7 @@ int main(int argc, char** argv) {
 			
 			MPI_File stats;
 			MPI_File_open(MPI_COMM_SELF,
-						  "stats.txt", MPI_MODE_APPEND | MPI_MODE_WRONLY,
+						  "./stats.txt", MPI_MODE_APPEND | MPI_MODE_WRONLY,
 						  MPI_INFO_NULL, &stats);
 			
 			for (int i = 0; i < argc; i++) {
@@ -676,6 +709,12 @@ int main(int argc, char** argv) {
 		}
 	}
 	
+	MPI_Barrier(MPI_COMM_WORLD);
+	if (mpi_rank == MPI_MASTER_RANK) {
+		printf("COMPLETE: Close\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
+	
 	
 	// Output //
 	{
@@ -690,7 +729,7 @@ int main(int argc, char** argv) {
 		
 		MPI_File datafile;
 		MPI_File_open(MPI_COMM_WORLD,
-					  "data.bin", MPI_MODE_CREATE | MPI_MODE_WRONLY,
+					  "./data.bin", MPI_MODE_CREATE | MPI_MODE_WRONLY,
 					  MPI_INFO_NULL, &datafile);
 		
 		MPI_Aint offset;
@@ -702,6 +741,12 @@ int main(int argc, char** argv) {
 							  mpi_size, MPI_LONG,
 							  MPI_STATUS_IGNORE);
 	}
+	
+	MPI_Barrier(MPI_COMM_WORLD);
+	if (mpi_rank == MPI_MASTER_RANK) {
+		printf("COMPLETE\n");
+	}
+	MPI_Barrier(MPI_COMM_WORLD);
 	
 	free(depot_a);
 	free(depot_d);
