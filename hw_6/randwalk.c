@@ -675,7 +675,7 @@ int main(int argc, char** argv) {
             
             MPI_File stats;
             MPI_File_open(MPI_COMM_SELF,
-                          "./stats.txt", MPI_MODE_APPEND | MPI_MODE_WRONLY,
+                          "./stats.txt", MPI_MODE_CREATE | MPI_MODE_WRONLY,
                           MPI_INFO_NULL, &stats);
             
             for (int i = 0; i < argc; i++) {
@@ -688,12 +688,10 @@ int main(int argc, char** argv) {
                                MPI_CHAR, MPI_STATUS_IGNORE);
             }
             
-            char buffer_to_print[3] = "s\n";
+            char double_to_print[64];
+            sprintf(double_to_print, "%.3lfs\n", elapsed_time_total);
             MPI_File_write(stats,
-                           &elapsed_time_total, 1,
-                           MPI_DOUBLE, MPI_STATUS_IGNORE);
-            MPI_File_write(stats,
-                           &buffer_to_print, 2,
+                           double_to_print, (int)strlen(double_to_print),
                            MPI_CHAR, MPI_STATUS_IGNORE);
             
             MPI_File_close(&stats);
@@ -721,14 +719,19 @@ int main(int argc, char** argv) {
                       "./data.bin", MPI_MODE_CREATE | MPI_MODE_WRONLY,
                       MPI_INFO_NULL, &datafile);
         
+        MPI_Barrier(MPI_COMM_WORLD);
+        
+        MPI_Aint dummy;
         MPI_Aint offset;
-        MPI_Type_extent(MPI_LONG, &offset);
+        MPI_Type_get_extent(MPI_LONG, &dummy, &offset);
         
         MPI_File_write_at_all(datafile,
                               offset * mpi_rank * mpi_size,
                               particle_absolute_distribution,
                               mpi_size, MPI_LONG,
                               MPI_STATUS_IGNORE);
+        
+        MPI_File_close(&datafile);
     }
     
     
