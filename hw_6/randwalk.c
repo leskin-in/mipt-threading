@@ -118,11 +118,15 @@ long Field_height;
 PARTICLE* Depot_a;
 /// Total number of the particles currently being processed
 int Depot_a_length;
+/// Total size of allocated memory for 'Depot_a'
+int Depot_a_memory_length;
 
 /// Depot for the dead particles (which died in current thread's action zone)
 PARTICLE* Depot_d;
 /// Total number of the dead particles in current thread's action zone
 int Depot_d_length;
+/// Total size of allocated memory for 'Depot_d'
+int Depot_d_memory_length;
 
 
 
@@ -255,11 +259,13 @@ long get_sector_with_offset(const PARTICLE* unit, long current_sector) {
 /**
  * @brief Add a patricle to 'depot_a'
  * @return 0 if successful
- * @return -1 if there is not enough memory available for the 'realloc()'
  */
 int depot_add(const PARTICLE* unit) {
     Depot_a_length += 1;
-    Depot_a = realloc(Depot_a, Depot_a_length * sizeof(PARTICLE));
+    if (Depot_a_length > Depot_a_memory_length) {
+        Depot_a_memory_length *= 2;
+        Depot_a = realloc(Depot_a, Depot_a_memory_length * sizeof(PARTICLE));
+    }
     Depot_a[Depot_a_length - 1] = *unit;
     return 0;
 }
@@ -276,8 +282,6 @@ void depot_remove(int depot_a_id) {
     }
     Depot_a[depot_a_id] = Depot_a[Depot_a_length - 1];
     Depot_a_length -= 1;
-    Depot_a = realloc(Depot_a, Depot_a_length * sizeof(PARTICLE));
-    errno = 0;
 }
 
 
@@ -293,7 +297,10 @@ int depot_die(int depot_a_id) {
         return -1;
     }
     Depot_d_length += 1;
-    Depot_d = realloc(Depot_d, Depot_d_length * sizeof(PARTICLE));
+    if (Depot_d_length > Depot_d_memory_length) {
+        Depot_d_memory_length *= 2;
+        Depot_d = realloc(Depot_d, Depot_d_memory_length * sizeof(PARTICLE));
+    }
     Depot_d[Depot_d_length - 1] = Depot_a[depot_a_id];
     depot_remove(depot_a_id);
     return 0;
@@ -534,7 +541,11 @@ int main(int argc, char** argv) {
         srand48((long)time(NULL));
         
         Depot_a_length = (int)Base_N;
-        if ((Depot_a = malloc(Depot_a_length * sizeof(PARTICLE))) == NULL) {
+        Depot_a_memory_length = 1;
+        while (Depot_a_memory_length < Depot_a_length) {
+            Depot_a_memory_length *= 2;
+        }
+        if ((Depot_a = malloc(Depot_a_memory_length * sizeof(PARTICLE))) == NULL) {
             fprintf(stderr, "malloc() / realloc() error\n");
             return -1;
         }
@@ -549,7 +560,12 @@ int main(int argc, char** argv) {
         }
         
         Depot_d_length = 0;
-        Depot_d = NULL;
+        Depot_d_memory_length = Depot_a_memory_length;
+        if ((Depot_d = malloc(Depot_d_memory_length * sizeof(PARTICLE))) == NULL) {
+            fprintf(stderr, "malloc() / realloc() error\n");
+            free(Depot_a);
+            return -1;
+        }
     }
     
     
