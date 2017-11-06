@@ -336,11 +336,6 @@ void* thread_processor(void* context) {
                     stop_flag = 1;
                     break;
                 }
-                printf("ADD: (%ld %ld) [%ld] %ld\n",
-                       particle_buffer.particle.x,
-                       particle_buffer.particle.y,
-                       particle_buffer.particle.origin_sector,
-                       particle_buffer.particle.steps_to_live);
                 
                 depot_add(&(particle_buffer.particle));
             }
@@ -420,11 +415,6 @@ void* thread_processor(void* context) {
                 if (get_sector_with_offset(&depot_a[i], mpi_rank) != mpi_rank) {
                     particle_buffer.particle = depot_a[i];
                     particle_buffer.type = CLASSIFIER_NORM;
-                    printf("SND: (%ld %ld) [%ld] %ld\n",
-                           particle_buffer.particle.x,
-                           particle_buffer.particle.y,
-                           particle_buffer.particle.origin_sector,
-                           particle_buffer.particle.steps_to_live);
                     msgsnd(qid_send,
                            &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
                     depot_remove(i);
@@ -512,26 +502,16 @@ int main(int argc, char** argv) {
     
     // Initialize PARTICE_mpi_t //
     {
-        PARTICLE example;
-        
-        MPI_Datatype sequence[4] = {MPI_LONG, MPI_LONG, MPI_LONG, MPI_LONG};
-        
-        int sequence_amounts[4] = {1, 1, 1, 1};
-        
-        MPI_Aint sequence_displacements[4];
-        MPI_Get_address(&example, &sequence_displacements[0]);
-        MPI_Get_address(&example.y, &sequence_displacements[1]);
-        MPI_Get_address(&example.origin_sector, &sequence_displacements[2]);
-        MPI_Get_address(&example.steps_to_live, &sequence_displacements[3]);
-        for (int i = 1; i < 3; i++) {
-            sequence_displacements[i] -= sequence_displacements[0];
-        }
+        MPI_Datatype sequence[1] = {MPI_LONG};
+        int sequence_amounts[1] = {4};
+        MPI_Aint sequence_displacements[1];
         sequence_displacements[0] = 0;
         
         MPI_Type_create_struct(1,
                                sequence_amounts, sequence_displacements,
                                sequence,
                                &PARTICLE_mpi_t);
+        
         MPI_Type_commit(&PARTICLE_mpi_t);
     }
     
@@ -614,11 +594,6 @@ int main(int argc, char** argv) {
                 
                 if (flag) {
                     buffer_recv.particle = mpi_recv_holder;
-                    printf("get: (%ld %ld) [%ld] %ld\n",
-                           buffer_recv.particle.x,
-                           buffer_recv.particle.y,
-                           buffer_recv.particle.origin_sector,
-                           buffer_recv.particle.steps_to_live);
                     if (status.MPI_TAG == CLASSIFIER_REPORT) {
                         // Some particle has died
                         N_dead += 1;
@@ -651,15 +626,8 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 
-                printf("snd: (%ld %ld) [%ld] %ld\n",
-                       buffer_send.particle.x,
-                       buffer_send.particle.y,
-                       buffer_send.particle.origin_sector,
-                       buffer_send.particle.steps_to_live);
-                
                 if (buffer_send.type == CLASSIFIER_REPORT) {
                     // Send report to everyone (including self)
-                    printf("REPORT at %d\n", mpi_rank);
                     for (int i = 0; i < mpi_size; i++) {
                         MPI_Isend(&(buffer_send.particle), 1, PARTICLE_mpi_t,
                                   i,
@@ -676,11 +644,13 @@ int main(int argc, char** argv) {
             }
         }
     }
+    struct timeval t_end;
+    gettimeofday(&t_end, NULL);
+    double elapsed_time = ((double) t_end.tv_sec +
+                           ((double) t_end.tv_usec / 1000000.0) -
+                           (double) t_start.tv_sec -
+                           ((double) t_start.tv_usec / 1000000.0));
     
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (mpi_rank == MPI_MASTER_RANK) {
-        printf("Main cycle complete\n");
-    }
     MPI_Barrier(MPI_COMM_WORLD);
     
     
@@ -692,14 +662,6 @@ int main(int argc, char** argv) {
         msgctl(qid_send, IPC_RMID, NULL);
         msgctl(qid_receive, IPC_RMID, NULL);
         errno = 0;
-        
-        struct timeval t_end;
-        gettimeofday(&t_end, NULL);
-        
-        double elapsed_time = ((double) t_end.tv_sec +
-                               ((double) t_end.tv_usec / 1000000.0) -
-                               (double) t_start.tv_sec -
-                               ((double) t_start.tv_usec / 1000000.0));
         
         if (mpi_rank == MPI_MASTER_RANK) {
             // Write statistics into file
