@@ -35,7 +35,7 @@ struct msgbuf_particle {
 
 // Global service variables //
 
-const size_t SIZEOF_MSGBUF_PARTICLE = 5 * sizeof(long);
+const size_t SIZEOF_MSGBUF_PARTICLE = 4 * sizeof(long);
 
 const double DOUBLE_ERROR = 1e-7;
 
@@ -200,6 +200,8 @@ long get_sector_with_offset(const PARTICLE* unit, long current_sector) {
         return current_sector;
     }
     
+    int field_borders_reached;
+    
     long x_min = l * (current_sector % a);
     long y_min = l * (current_sector / a);
     long x_max = x_min + l - 1;
@@ -209,29 +211,48 @@ long get_sector_with_offset(const PARTICLE* unit, long current_sector) {
     x_max += offset;
     y_max += offset;
     
+    field_borders_reached = 0;
     if (x_min < 0) {
         x_min += field_width;
+        field_borders_reached = 1;
     }
-    else if (x_max > field_width) {
+    else if (x_max >= field_width) {
         x_max -= field_width;
+        field_borders_reached = 1;
     }
-    if ((unit ->x < x_min) && (unit ->x > x_max)) {
-        return ruled_sector;
+    if (field_borders_reached == 1) {
+        if ((unit ->x < x_min) && (unit ->x > x_max)) {
+            return ruled_sector;
+        }
+    }
+    else {
+        if ((unit ->x < x_min) || (unit ->x > x_max)) {
+            return ruled_sector;
+        }
     }
     
+    field_borders_reached = 0;
     if (y_min < 0) {
         y_min += field_height;
+        field_borders_reached = 1;
     }
-    else if (y_max > field_height) {
+    else if (y_max >= field_height) {
         y_max -= field_height;
+        field_borders_reached = 1;
     }
-    if ((unit ->y < y_min) && (unit ->y > y_max)) {
-        return ruled_sector;
+    if (field_borders_reached == 1) {
+        if ((unit ->y < y_min) && (unit ->y > y_max)) {
+            return ruled_sector;
+        }
+    }
+    else {
+        if ((unit ->y < y_min) || (unit ->y > y_max)) {
+            return ruled_sector;
+        }
     }
     
     return current_sector;
 }
-
 
 
 
@@ -315,8 +336,13 @@ void* thread_processor(void* context) {
                     stop_flag = 1;
                     break;
                 }
+                printf("ADD: (%ld %ld) [%ld] %ld\n",
+                       particle_buffer.particle.x,
+                       particle_buffer.particle.y,
+                       particle_buffer.particle.origin_sector,
+                       particle_buffer.particle.steps_to_live);
                 
-                depot_add(&particle_buffer.particle);
+                depot_add(&(particle_buffer.particle));
             }
             // Remove ENOMSG error
             errno = 0;
@@ -394,8 +420,11 @@ void* thread_processor(void* context) {
                 if (get_sector_with_offset(&depot_a[i], mpi_rank) != mpi_rank) {
                     particle_buffer.particle = depot_a[i];
                     particle_buffer.type = CLASSIFIER_NORM;
-                    printf("Passing particle from %d to %d\n",
-                           mpi_rank, (int)get_sector(&depot_a[i]));
+                    printf("SND: (%ld %ld) [%ld] %ld\n",
+                           particle_buffer.particle.x,
+                           particle_buffer.particle.y,
+                           particle_buffer.particle.origin_sector,
+                           particle_buffer.particle.steps_to_live);
                     msgsnd(qid_send,
                            &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
                     depot_remove(i);
@@ -485,14 +514,15 @@ int main(int argc, char** argv) {
     {
         PARTICLE example;
         
-        MPI_Datatype sequence[3] = {MPI_LONG, MPI_LONG, MPI_LONG};
+        MPI_Datatype sequence[4] = {MPI_LONG, MPI_LONG, MPI_LONG, MPI_LONG};
         
-        int sequence_amounts[3] = {2, 1, 1};
+        int sequence_amounts[4] = {1, 1, 1, 1};
         
-        MPI_Aint sequence_displacements[3];
+        MPI_Aint sequence_displacements[4];
         MPI_Get_address(&example, &sequence_displacements[0]);
-        MPI_Get_address(&example.origin_sector, &sequence_displacements[1]);
-        MPI_Get_address(&example.steps_to_live, &sequence_displacements[2]);
+        MPI_Get_address(&example.y, &sequence_displacements[1]);
+        MPI_Get_address(&example.origin_sector, &sequence_displacements[2]);
+        MPI_Get_address(&example.steps_to_live, &sequence_displacements[3]);
         for (int i = 1; i < 3; i++) {
             sequence_displacements[i] -= sequence_displacements[0];
         }
@@ -562,12 +592,14 @@ int main(int argc, char** argv) {
     {
         pthread_mutex_unlock(&thread_processor_lock);
         
-        struct msgbuf_particle buffer;
+        PARTICLE mpi_recv_holder;
+        struct msgbuf_particle buffer_recv;
+        struct msgbuf_particle buffer_send;
         MPI_Request request_recv;
         
         // Pre-cycle MPI_Irecv for the 'request_recv' initialization
         {
-            MPI_Irecv(&buffer.particle,
+            MPI_Irecv(&mpi_recv_holder,
                       1, PARTICLE_mpi_t, MPI_ANY_SOURCE, MPI_ANY_TAG,
                       MPI_COMM_WORLD, &request_recv);
         }
@@ -580,22 +612,28 @@ int main(int argc, char** argv) {
                 
                 MPI_Test(&request_recv, &flag, &status);
                 
-                if (flag != 0) {
+                if (flag) {
+                    buffer_recv.particle = mpi_recv_holder;
+                    printf("get: (%ld %ld) [%ld] %ld\n",
+                           buffer_recv.particle.x,
+                           buffer_recv.particle.y,
+                           buffer_recv.particle.origin_sector,
+                           buffer_recv.particle.steps_to_live);
                     if (status.MPI_TAG == CLASSIFIER_REPORT) {
                         // Some particle has died
                         N_dead += 1;
                         if (N_dead == N * mpi_size) {
                             // Cease operations: Send message to 'thread_processor'
-                            buffer.type = CLASSIFIER_STOP;
-                            msgsnd(qid_receive, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                            buffer_recv.type = CLASSIFIER_STOP;
+                            msgsnd(qid_receive, &buffer_recv, SIZEOF_MSGBUF_PARTICLE, 0);
                             break;
                         }
                     }
                     else {
-                        buffer.type = CLASSIFIER_NORM;
-                        msgsnd(qid_receive, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                        buffer_recv.type = CLASSIFIER_NORM;
+                        msgsnd(qid_receive, &buffer_recv, SIZEOF_MSGBUF_PARTICLE, 0);
                     }
-                    MPI_Irecv(&buffer.particle,
+                    MPI_Irecv(&mpi_recv_holder,
                               1, PARTICLE_mpi_t, MPI_ANY_SOURCE, MPI_ANY_TAG,
                               MPI_COMM_WORLD, &request_recv);
                 }
@@ -607,25 +645,31 @@ int main(int argc, char** argv) {
                 MPI_Request dummy;
                 
                 if (msgrcv(qid_send,
-                           &buffer, SIZEOF_MSGBUF_PARTICLE, 0,
+                           &buffer_send, SIZEOF_MSGBUF_PARTICLE, 0,
                            MSG_NOERROR | IPC_NOWAIT) < 0) {
                     errno = 0;
                     continue;
                 }
                 
-                if (buffer.type == CLASSIFIER_REPORT) {
+                printf("snd: (%ld %ld) [%ld] %ld\n",
+                       buffer_send.particle.x,
+                       buffer_send.particle.y,
+                       buffer_send.particle.origin_sector,
+                       buffer_send.particle.steps_to_live);
+                
+                if (buffer_send.type == CLASSIFIER_REPORT) {
                     // Send report to everyone (including self)
                     printf("REPORT at %d\n", mpi_rank);
                     for (int i = 0; i < mpi_size; i++) {
-                        MPI_Isend(&buffer.particle, 1, PARTICLE_mpi_t,
+                        MPI_Isend(&(buffer_send.particle), 1, PARTICLE_mpi_t,
                                   i,
                                   CLASSIFIER_REPORT, MPI_COMM_WORLD, &dummy);
                         MPI_Request_free(&dummy);
                     }
                 }
                 else {
-                    MPI_Isend(&buffer.particle, 1, PARTICLE_mpi_t,
-                              (int)get_sector(&buffer.particle),
+                    MPI_Isend(&(buffer_send.particle), 1, PARTICLE_mpi_t,
+                              (int)get_sector(&(buffer_send.particle)),
                               CLASSIFIER_NORM, MPI_COMM_WORLD, &dummy);
                     MPI_Request_free(&dummy);
                 }

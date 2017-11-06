@@ -56,7 +56,7 @@ void* randgen_supplier(void* context) {
              i < randgen_buffer_size - qid_rand_supply_info.msg_qnum;
              i++) {
             buffer.number = drand48();
-            msgsnd(randgen_qid, &buffer, sizeof(struct randgen_msgbuf), 0);
+            msgsnd(randgen_qid, &buffer, sizeof(double), 0);
         }
     }
     
@@ -99,7 +99,7 @@ double randgen_get(void) {
         return -1.0;
     }
     struct randgen_msgbuf buffer;
-    if (msgrcv(randgen_qid, &buffer, sizeof(struct randgen_msgbuf), 0, 0) < 0) {
+    if (msgrcv(randgen_qid, &buffer, sizeof(double), 0, 0) < 0) {
         return -1.0;
     }
     return buffer.number;
