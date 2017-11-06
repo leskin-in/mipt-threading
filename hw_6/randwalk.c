@@ -9,6 +9,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "lock_queue.h"
+#include "lock_queue_2.h"
+
 
 
 
@@ -51,10 +54,10 @@ MPI_Datatype PARTICLE_mpi_t;
 
 
 /// System V queue ID for the sender thread
-int Qid_send;
+
 
 /// System V queue ID for the receiver thread
-int Qid_receive;
+
 
 
 pthread_t Thread_processor_tid;
@@ -332,9 +335,7 @@ void* thread_processor(void* context) {
             int stop_flag = 0;
             
             // Receive all messages in the queue
-            while (msgrcv(Qid_receive,
-                          &particle_buffer, SIZEOF_MSGBUF_PARTICLE,
-                          0, IPC_NOWAIT) > 0) {
+            while (queue2_pop(&particle_buffer) == 0) {
                 if (particle_buffer.type == CLASSIFIER_STOP) {
                     stop_flag = 1;
                     break;
@@ -362,16 +363,14 @@ void* thread_processor(void* context) {
                 if (get_sector(&Depot_a[i]) == Mpi_rank) {
                     particle_buffer.particle = Depot_a[i];
                     particle_buffer.type = CLASSIFIER_REPORT;
-                    msgsnd(Qid_send,
-                           &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    queue_push(&particle_buffer);
                     depot_die(i);
                     i -= 1;
                 }
                 else {
                     particle_buffer.particle = Depot_a[i];
                     particle_buffer.type = CLASSIFIER_NORM;
-                    msgsnd(Qid_send,
-                           &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    queue_push(&particle_buffer);
                     depot_remove(i);
                     i -= 1;
                 }
@@ -418,8 +417,7 @@ void* thread_processor(void* context) {
                 if (get_sector_with_offset(&Depot_a[i], Mpi_rank) != Mpi_rank) {
                     particle_buffer.particle = Depot_a[i];
                     particle_buffer.type = CLASSIFIER_NORM;
-                    msgsnd(Qid_send,
-                           &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    queue_push(&particle_buffer);
                     depot_remove(i);
                     i -= 1;
                 }
@@ -513,15 +511,6 @@ int main(int argc, char** argv) {
     
     // Prepare and launch sender and receiver threads //
     {
-        if ((Qid_receive = msgget(IPC_PRIVATE, 0666)) < 0) {
-            fprintf(stderr, "Receive message queue cannot be created\n");
-            return -1;
-        }
-        if ((Qid_send = msgget(IPC_PRIVATE, 0666)) < 0) {
-            fprintf(stderr, "Send message queue cannot be created\n");
-            return -1;
-        }
-        
         srand48(time(NULL) + Mpi_rank * 10);
         
         // Prevent 'thread_processor' from doing anything
@@ -601,13 +590,13 @@ int main(int argc, char** argv) {
                         if (N_dead == Base_N * Mpi_size) {
                             // Cease operations: Send message to 'thread_processor'
                             buffer_recv.type = CLASSIFIER_STOP;
-                            msgsnd(Qid_receive, &buffer_recv, SIZEOF_MSGBUF_PARTICLE, 0);
+                            queue2_push(&buffer_recv);
                             break;
                         }
                     }
                     else {
                         buffer_recv.type = CLASSIFIER_NORM;
-                        msgsnd(Qid_receive, &buffer_recv, SIZEOF_MSGBUF_PARTICLE, 0);
+                        queue2_push(&buffer_recv);
                     }
                     MPI_Irecv(&mpi_recv_holder,
                               1, PARTICLE_mpi_t, MPI_ANY_SOURCE, MPI_ANY_TAG,
@@ -620,10 +609,7 @@ int main(int argc, char** argv) {
             {
                 MPI_Request dummy;
                 
-                if (msgrcv(Qid_send,
-                           &buffer_send, SIZEOF_MSGBUF_PARTICLE, 0,
-                           MSG_NOERROR | IPC_NOWAIT) < 0) {
-                    errno = 0;
+                if (queue_pop(&buffer_send) < 0) {
                     continue;
                 }
                 
@@ -659,8 +645,8 @@ int main(int argc, char** argv) {
     {
         MPI_Type_free(&PARTICLE_mpi_t);
         pthread_join(Thread_processor_tid, NULL);
-        msgctl(Qid_send, IPC_RMID, NULL);
-        msgctl(Qid_receive, IPC_RMID, NULL);
+        queue_clean();
+        queue2_clean();
         errno = 0;
         
         if (Mpi_rank == MPI_MASTER_RANK) {
