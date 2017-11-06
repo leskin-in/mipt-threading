@@ -475,14 +475,6 @@ int main(int argc, char** argv) {
         p_up = strtod(argv[8], NULL);
         p_down = strtod(argv[9], NULL);
         
-        // FIXME: errno is corrupted by some MPI routines and becomes incorrect
-        // Check conversions
-//      if (errno != 0) {
-//          fprintf(stderr, "Invalid arguments\n");
-//          print_help();
-//          return -1;
-//      }
-        
         if (a * b != mpi_size) {
             fprintf(stderr, "A number of MPI units is incorrect\n");
             return -1;
@@ -675,7 +667,8 @@ int main(int argc, char** argv) {
             
             MPI_File stats;
             MPI_File_open(MPI_COMM_SELF,
-                          "./stats.txt", MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                          "./stats.txt",
+                          MPI_MODE_CREATE | MPI_MODE_WRONLY | MPI_MODE_APPEND,
                           MPI_INFO_NULL, &stats);
             
             for (int i = 0; i < argc; i++) {
@@ -705,7 +698,7 @@ int main(int argc, char** argv) {
     
     // Output //
     {
-        long particle_absolute_distribution[mpi_size];
+        unsigned int particle_absolute_distribution[mpi_size];
         for (int i = 0; i < mpi_size; i++) {
             particle_absolute_distribution[i] = 0;
         }
@@ -719,18 +712,16 @@ int main(int argc, char** argv) {
                       "./data.bin", MPI_MODE_CREATE | MPI_MODE_WRONLY,
                       MPI_INFO_NULL, &datafile);
         
-        MPI_Barrier(MPI_COMM_WORLD);
-        
         MPI_Aint dummy;
         MPI_Aint offset;
-        MPI_Type_get_extent(MPI_LONG, &dummy, &offset);
+        MPI_Type_get_extent(MPI_UNSIGNED, &dummy, &offset);
         
-        MPI_File_write_at_all(datafile,
-                              offset * mpi_rank * mpi_size,
-                              particle_absolute_distribution,
-                              mpi_size, MPI_LONG,
-                              MPI_STATUS_IGNORE);
+        MPI_File_write_ordered(datafile,
+                               particle_absolute_distribution,
+                               mpi_size, MPI_UNSIGNED,
+                               MPI_STATUS_IGNORE);
         
+        MPI_Barrier(MPI_COMM_WORLD);
         MPI_File_close(&datafile);
     }
     
