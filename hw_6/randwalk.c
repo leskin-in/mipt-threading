@@ -9,8 +9,6 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "randgen.h"
-
 
 
 
@@ -41,8 +39,6 @@ const double DOUBLE_ERROR = 1e-7;
 
 /// Interval (in ticks) at which the receive operation is performed
 const int RECEIVE_TICK_INTERVAL = 64;
-
-const int QUEUE_RAND_NORMAL_LENGTH = 512;
 
 
 int Mpi_size;
@@ -380,7 +376,7 @@ void* thread_processor(void* context) {
                 /// Cumulative sum of p_*. Used to determine the way a particle should go
                 double p_cursor = 0.0;
                 
-                while ((d_rand = randgen_get()) < -DOUBLE_ERROR) {}
+                d_rand = drand48();
                 
                 p_cursor += P_left;
                 if (d_rand - p_cursor < DOUBLE_ERROR) {
@@ -519,11 +515,7 @@ int main(int argc, char** argv) {
             return -1;
         }
         
-        if (randgen_init(QUEUE_RAND_NORMAL_LENGTH,
-                         (unsigned int)Mpi_rank) < 0) {
-            fprintf(stderr, "Random number generator cannot be launched\n");
-            return -1;
-        }
+        srand48(time(NULL) + Mpi_rank * 10);
         
         // Prevent 'thread_processor' from doing anything
         pthread_mutex_init(&Thread_processor_lock, NULL);
@@ -651,7 +643,6 @@ int main(int argc, char** argv) {
     {
         MPI_Type_free(&PARTICLE_mpi_t);
         pthread_join(Thread_processor_tid, NULL);
-        randgen_stop();
         msgctl(Qid_send, IPC_RMID, NULL);
         msgctl(Qid_receive, IPC_RMID, NULL);
         errno = 0;
