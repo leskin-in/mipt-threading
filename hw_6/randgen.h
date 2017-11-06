@@ -1,6 +1,7 @@
 #ifndef RANDGEN_H
 #define RANDGEN_H
 
+#include <errno.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <sys/ipc.h>

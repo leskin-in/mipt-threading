@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "randgen.h"
 
@@ -56,13 +57,14 @@ MPI_Datatype PARTICLE_mpi_t;
 /// System V queue ID for the sender thread
 int qid_send;
 
-pthread_t thread_sender_tid;
-
-
 /// System V queue ID for the receiver thread
 int qid_receive;
 
-pthread_t thread_receiver_tid;
+
+pthread_t thread_processor_tid;
+
+// When this is locked, thread_processor cannot act
+pthread_mutex_t thread_processor_lock;
 
 
 /// System V message type and IPC tag: normal message
@@ -264,7 +266,7 @@ void depot_remove(int depot_a_id) {
 
 
 /**
- * @brief Kill a particle from 'depot_a' and remove it from there
+ * @brief Kill a particle from 'depot_a' and place it to 'depot_d'
  * @param depot_a_id Sequence number of a particle in 'depot_a'
  * @return 0 if successful
  * @return -1 if the 'realloc()' failed or a given ID is incorrect
@@ -283,98 +285,134 @@ int depot_die(int depot_a_id) {
 
 
 /**
- * @brief Thread function for the sender thread
+ * @brief Thread function for the particle processing thread
  */
-void* thread_sender(void* context) {
+void* thread_processor(void* context) {
     // Check launch
     {
-        int flag;
-        MPI_Initialized(&flag);
-        if ((context != NULL) || (flag == 0)) {
-            fprintf(stderr, "Sender thread is not launched properly\n");
-            return NULL;
-        }
-    }
-    
-    /// Message buffer for the System V message queue
-    struct msgbuf_particle buffer;
-    MPI_Request dummy;
-    
-    while (1) {
-        if (msgrcv(qid_send,
-                   &buffer, SIZEOF_MSGBUF_PARTICLE, 0, MSG_NOERROR) < 0) {
-            // Something bad happened, but do nothing
-            errno = 0;
-            continue;
-        }
-        
-        if (buffer.type == CLASSIFIER_STOP) {
-            // Cease operations
-            break;
-        }
-        
-        if (buffer.type == CLASSIFIER_REPORT) {
-            // Send report to everyone (including self)
-            for (int i = 0; i < mpi_size; i++) {
-                MPI_Isend(&buffer.particle,
-                          1, PARTICLE_mpi_t, i, CLASSIFIER_REPORT,
-                          MPI_COMM_WORLD, &dummy);
-                MPI_Request_free(&dummy);
-            }
-            continue;
-        }
-        
-        MPI_Isend(&buffer.particle,
-                  1, PARTICLE_mpi_t,
-                  (int)get_sector(&buffer.particle), CLASSIFIER_NORM,
-                  MPI_COMM_WORLD, &dummy);
-        MPI_Request_free(&dummy);
-    }
-    
-    return NULL;
-}
-
-
-
-/**
- * @brief Thread function for the receiver thread
- */
-void* thread_receiver(void* context) {
-    // Check launch
-    {
-        int flag;
-        MPI_Initialized(&flag);
-        if ((context != NULL) || (flag == 0)) {
+        if (context != NULL) {
             fprintf(stderr, "Receiver thread is not launched properly\n");
             return NULL;
         }
+        
+        pthread_mutex_lock(&thread_processor_lock);
     }
     
-    /// Message buffer for the System V message queue
-    struct msgbuf_particle buffer;
-    MPI_Status status;
+    struct msgbuf_particle particle_buffer;
     
+    int tick = 0;
     while (1) {
-        MPI_Recv(&buffer.particle,
-                 1, PARTICLE_mpi_t, MPI_ANY_SOURCE, MPI_ANY_TAG,
-                 MPI_COMM_WORLD, &status);
+        tick = (tick + 1) % RECEIVE_TICK_INTERVAL;
         
-        if (status.MPI_TAG == CLASSIFIER_REPORT) {
-            // Some particle has died
-            N_dead += 1;
-            if (N_dead == N) {
-                // Cease operations: Send message both to main() and sender
-                buffer.type = CLASSIFIER_STOP;
-                msgsnd(qid_send, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
-                msgsnd(qid_receive, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+        if (tick == 0) {
+            int stop_flag = 0;
+            
+            // Receive all messages in the queue
+            while (msgrcv(qid_receive,
+                          &particle_buffer, SIZEOF_MSGBUF_PARTICLE,
+                          0, IPC_NOWAIT) > 0) {
+                if (particle_buffer.type == CLASSIFIER_STOP) {
+                    stop_flag = 1;
+                    break;
+                }
+                
+                depot_add(&particle_buffer.particle);
+            }
+            // Remove ENOMSG error
+            errno = 0;
+            
+            // Break the outer 'while' if the inner one was broken
+            if (stop_flag == 1) {
                 break;
             }
         }
         
-        // Send the particle received for processing
-        buffer.type = CLASSIFIER_NORM;
-        msgsnd(qid_receive, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+        if (depot_a_length == 0) {
+            // Perform an immediate particle receive
+            tick = -1;
+            continue;
+        }
+        
+        for (int i = 0; i < depot_a_length; i++) {
+            if (depot_a[i].steps_to_live == 0) {
+                if (get_sector(&depot_a[i]) == mpi_rank) {
+                    particle_buffer.particle = depot_a[i];
+                    particle_buffer.type = CLASSIFIER_REPORT;
+                    msgsnd(qid_send,
+                           &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    depot_die(i);
+                    i -= 1;
+                }
+                else {
+                    particle_buffer.particle = depot_a[i];
+                    particle_buffer.type = CLASSIFIER_NORM;
+                    msgsnd(qid_send,
+                           &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    depot_remove(i);
+                    i -= 1;
+                }
+            }
+            else {
+                /// Random number; see also 'randgen_get'
+                double d_rand;
+                
+                /// Cumulative sum of p_*. Used to determine the way a particle should go
+                double p_cursor = 0.0;
+                
+                while ((d_rand = randgen_get()) < -DOUBLE_ERROR) {}
+                
+                p_cursor += p_left;
+                if (d_rand - p_cursor < DOUBLE_ERROR) {
+                    depot_a[i].x = (depot_a[i].x == 0) ?
+                                   (field_width - 1) :
+                                   (depot_a[i].x - 1);
+                    d_rand = 10.0;
+                }
+                
+                p_cursor += p_up;
+                if (d_rand - p_cursor < DOUBLE_ERROR) {
+                    depot_a[i].y = (depot_a[i].y == 0) ?
+                                   (field_height - 1) :
+                                   (depot_a[i].y - 1);
+                    d_rand = 10.0;
+                }
+                
+                p_cursor += p_right;
+                if (d_rand - p_cursor < DOUBLE_ERROR) {
+                    depot_a[i].x = (depot_a[i].x + 1) % field_width;
+                    d_rand = 10.0;
+                }
+                
+                p_cursor += p_down;
+                if (d_rand - p_cursor < DOUBLE_ERROR) {
+                    depot_a[i].y = (depot_a[i].y + 1) % field_height;
+                    // d_rand = 10.0;
+                }
+                
+                depot_a[i].steps_to_live -= 1;
+                
+                if (get_sector_with_offset(&depot_a[i], mpi_rank) != mpi_rank) {
+                    particle_buffer.particle = depot_a[i];
+                    particle_buffer.type = CLASSIFIER_NORM;
+                    printf("Passing particle from %d to %d\n",
+                           mpi_rank, (int)get_sector(&depot_a[i]));
+                    msgsnd(qid_send,
+                           &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    depot_remove(i);
+                    i -= 1;
+                }
+            }
+        }
     }
+    
+    // Check 'depot_a'
+    if (depot_a_length != 0) {
+        fprintf(stderr, "A processing error occurred\n");
+    }
+    
+    pthread_mutex_unlock(&thread_processor_lock);
+    
+    sleep(5);
     
     return NULL;
 }
@@ -386,10 +424,9 @@ int main(int argc, char** argv) {
     // Initialize MPI //
     {
         int mpi_thread_env_provided;
-        MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &mpi_thread_env_provided);
-        if ((mpi_thread_env_provided != MPI_THREAD_MULTIPLE) &&
-                (mpi_thread_env_provided != MPI_THREAD_SERIALIZED)) {
-            fprintf(stderr, "This program requires more pthread privileges\n");
+        MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &mpi_thread_env_provided);
+        if (mpi_thread_env_provided == MPI_THREAD_SINGLE) {
+            fprintf(stderr, "This program requires pthread support\n");
             return -1;
         }
         
@@ -419,7 +456,7 @@ int main(int argc, char** argv) {
         p_up = strtod(argv[8], NULL);
         p_down = strtod(argv[9], NULL);
         
-        // FIXME: errno is changed by some MPI routines and becomes incorrect
+        // FIXME: errno is corrupted by some MPI routines and becomes incorrect
         // Check conversions
 //      if (errno != 0) {
 //          fprintf(stderr, "Invalid arguments\n");
@@ -462,7 +499,9 @@ int main(int argc, char** argv) {
         sequence_displacements[0] = 0;
         
         MPI_Type_create_struct(1,
-                               sequence_amounts, sequence_displacements, sequence, &PARTICLE_mpi_t);
+                               sequence_amounts, sequence_displacements,
+                               sequence,
+                               &PARTICLE_mpi_t);
         MPI_Type_commit(&PARTICLE_mpi_t);
     }
     
@@ -478,28 +517,22 @@ int main(int argc, char** argv) {
             return -1;
         }
         
-        if (pthread_create(&thread_receiver_tid, NULL,
-                           thread_receiver, NULL) < 0) {
-            fprintf(stderr, "Receiver cannot be launched\n");
-            return -1;
-        }
-        if (pthread_create(&thread_sender_tid, NULL,
-                           thread_sender, NULL) < 0) {
-            fprintf(stderr, "Sender cannot be launched\n");
-            return -1;
-        }
-        
         if (randgen_init(QUEUE_RAND_NORMAL_LENGTH) < 0) {
             fprintf(stderr, "Random number generator cannot be launched\n");
             return -1;
         }
+        
+        // Prevent 'thread_processor' from doing anything
+        pthread_mutex_init(&thread_processor_lock, NULL);
+        pthread_mutex_lock(&thread_processor_lock);
+        
+        if (pthread_create(&thread_processor_tid, NULL,
+                           thread_processor, NULL) < 0) {
+            fprintf(stderr, "Processor thread cannot be launched\n");
+            return -1;
+        }
     }
     
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (mpi_rank == MPI_MASTER_RANK) {
-        printf("PREPARE: Particles setup\n");
-    }
-    MPI_Barrier(MPI_COMM_WORLD);
     
     // Prepare particles of this sector //
     {
@@ -510,12 +543,6 @@ int main(int argc, char** argv) {
             fprintf(stderr, "malloc() / realloc() error\n");
             return -1;
         }
-        
-        MPI_Barrier(MPI_COMM_WORLD);
-        if (mpi_rank == MPI_MASTER_RANK) {
-            printf("PROGRESS: Particles setup\n");
-        }
-        MPI_Barrier(MPI_COMM_WORLD);
         
         for (int i = 0; i < N; i++) {
             depot_a[i].origin_sector = mpi_rank;
@@ -530,136 +557,97 @@ int main(int argc, char** argv) {
         depot_d = NULL;
     }
     
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (mpi_rank == MPI_MASTER_RANK) {
-        printf("COMPLETE: Particles setup\n");
-    }
-    MPI_Barrier(MPI_COMM_WORLD);
     
-    // Run main cycle of the program //
+    // Run main cycle of the program. 'main()' works with MPI //
     {
-        struct msgbuf_particle particle_buffer;
+        pthread_mutex_unlock(&thread_processor_lock);
         
-        /// If set to nonzero, then main() should cease operations
-        int stop_flag = 0;
+        struct msgbuf_particle buffer;
+        MPI_Request request_recv;
         
-        int tick = 0;
-        while (stop_flag == 0) {
-            tick = (tick + 1) % RECEIVE_TICK_INTERVAL;
-            
-            if (tick == 0) {
-                // Receive all messages in the queue
+        // Pre-cycle MPI_Irecv for the 'request_recv' initialization
+        {
+            MPI_Irecv(&buffer.particle,
+                      1, PARTICLE_mpi_t, MPI_ANY_SOURCE, MPI_ANY_TAG,
+                      MPI_COMM_WORLD, &request_recv);
+        }
+        
+        while (1) {
+            // Receive
+            {
+                MPI_Status status;
+                int flag = 0;
                 
-                while (msgrcv(qid_receive, &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0, IPC_NOWAIT) >= 0) {
-                    if (particle_buffer.type == CLASSIFIER_STOP) {
-                        stop_flag = 1;
-                        break;
-                        // Note that the outer 'while' cycle is not broken.
-                        // This is correct as there may be some particles
-                        // send to this sector from another one
-                        // after their actual death.
-                        // They should be put into 'depot_d' of this sector.
-                    }
-                    
-                    depot_add(&particle_buffer.particle);
-                }
+                MPI_Test(&request_recv, &flag, &status);
                 
-                // Remove ENOMSG error
-                errno = 0;
-            }
-            
-            if (depot_a_length == 0) {
-                // Require an immediate particle receive
-                tick = -1;
-                continue;
-            }
-            
-            for (int i = 0; i < depot_a_length; i++) {
-                if (depot_a[i].steps_to_live == 0) {
-                    if (get_sector(&depot_a[i]) == mpi_rank) {
-                        depot_die(i);
+                if (flag != 0) {
+                    if (status.MPI_TAG == CLASSIFIER_REPORT) {
+                        // Some particle has died
+                        N_dead += 1;
+                        if (N_dead == N * mpi_size) {
+                            // Cease operations: Send message to 'thread_processor'
+                            buffer.type = CLASSIFIER_STOP;
+                            msgsnd(qid_receive, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                            break;
+                        }
                     }
                     else {
-                        particle_buffer.particle = depot_a[i];
-                        particle_buffer.type = CLASSIFIER_NORM;
-                        msgsnd(qid_send,
-                               &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
-                        depot_remove(i);
+                        buffer.type = CLASSIFIER_NORM;
+                        msgsnd(qid_receive, &buffer, SIZEOF_MSGBUF_PARTICLE, 0);
+                    }
+                    MPI_Irecv(&buffer.particle,
+                              1, PARTICLE_mpi_t, MPI_ANY_SOURCE, MPI_ANY_TAG,
+                              MPI_COMM_WORLD, &request_recv);
+                }
+            }
+            
+            
+            // Send
+            {
+                MPI_Request dummy;
+                
+                if (msgrcv(qid_send,
+                           &buffer, SIZEOF_MSGBUF_PARTICLE, 0,
+                           MSG_NOERROR | IPC_NOWAIT) < 0) {
+                    errno = 0;
+                    continue;
+                }
+                
+                if (buffer.type == CLASSIFIER_REPORT) {
+                    // Send report to everyone (including self)
+                    printf("REPORT at %d\n", mpi_rank);
+                    for (int i = 0; i < mpi_size; i++) {
+                        MPI_Isend(&buffer.particle, 1, PARTICLE_mpi_t,
+                                  i,
+                                  CLASSIFIER_REPORT, MPI_COMM_WORLD, &dummy);
+                        MPI_Request_free(&dummy);
                     }
                 }
                 else {
-                    /// Random number; see also 'randgen_get'
-                    double d_rand;
-                    
-                    /// Cumulative sum of p_*. Used to determine the way a particle should go
-                    double p_cursor = 0.0;
-                    
-                    while ((d_rand = randgen_get()) < -DOUBLE_ERROR) {}
-                    
-                    p_cursor += p_left;
-                    if (d_rand - p_cursor < DOUBLE_ERROR) {
-                        depot_a[i].x = (depot_a[i].x == 0) ?
-                                       (field_width - 1) :
-                                       (depot_a[i].x - 1);
-                        d_rand = 10.0;
-                    }
-                    
-                    p_cursor += p_up;
-                    if (d_rand - p_cursor < DOUBLE_ERROR) {
-                        depot_a[i].y = (depot_a[i].y == 0) ?
-                                       (field_height - 1) :
-                                       (depot_a[i].y - 1);
-                        d_rand = 10.0;
-                    }
-                    
-                    p_cursor += p_right;
-                    if (d_rand - p_cursor < DOUBLE_ERROR) {
-                        depot_a[i].x = (depot_a[i].x + 1) % field_width;
-                        d_rand = 10.0;
-                    }
-                    
-                    p_cursor += p_down;
-                    if (d_rand - p_cursor < DOUBLE_ERROR) {
-                        depot_a[i].y = (depot_a[i].y + 1) % field_height;
-                        // d_rand = 10.0;
-                    }
-                    
-                    depot_a[i].steps_to_live -= 1;
-                    
-                    if (get_sector_with_offset(&depot_a[i], mpi_rank) != mpi_rank) {
-                        particle_buffer.particle = depot_a[i];
-                        particle_buffer.type = CLASSIFIER_NORM;
-                        msgsnd(qid_send,
-                               &particle_buffer, SIZEOF_MSGBUF_PARTICLE, 0);
-                        depot_remove(i);
-                    }
+                    MPI_Isend(&buffer.particle, 1, PARTICLE_mpi_t,
+                              (int)get_sector(&buffer.particle),
+                              CLASSIFIER_NORM, MPI_COMM_WORLD, &dummy);
+                    MPI_Request_free(&dummy);
                 }
             }
-            
-            MPI_Barrier(MPI_COMM_WORLD);
-            if (mpi_rank == MPI_MASTER_RANK) {
-                printf("Iteration...\n");
-            }
-            MPI_Barrier(MPI_COMM_WORLD);
-        }
-        
-        // Check 'depot_a'
-        if (depot_a_length != 0) {
-            fprintf(stderr, "A processing error occurred: Some particles may have stayed alive\n");
         }
     }
     
     MPI_Barrier(MPI_COMM_WORLD);
     if (mpi_rank == MPI_MASTER_RANK) {
-        printf("COMPLETE: Main cycle\n");
+        printf("Main cycle complete\n");
     }
     MPI_Barrier(MPI_COMM_WORLD);
     
+    
     // Completion actions //
     {
-        pthread_join(thread_receiver_tid, NULL);
-        pthread_join(thread_sender_tid, NULL);
+        MPI_Type_free(&PARTICLE_mpi_t);
+        pthread_join(thread_processor_tid, NULL);
         randgen_stop();
+        msgctl(qid_send, IPC_RMID, NULL);
+        msgctl(qid_receive, IPC_RMID, NULL);
+        errno = 0;
         
         struct timeval t_end;
         gettimeofday(&t_end, NULL);
@@ -708,11 +696,6 @@ int main(int argc, char** argv) {
             MPI_Send(&elapsed_time, 1, MPI_DOUBLE, 0, CLASSIFIER_TIME, MPI_COMM_WORLD);
         }
     }
-    
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (mpi_rank == MPI_MASTER_RANK) {
-        printf("COMPLETE: Close\n");
-    }
     MPI_Barrier(MPI_COMM_WORLD);
     
     
@@ -742,11 +725,6 @@ int main(int argc, char** argv) {
                               MPI_STATUS_IGNORE);
     }
     
-    MPI_Barrier(MPI_COMM_WORLD);
-    if (mpi_rank == MPI_MASTER_RANK) {
-        printf("COMPLETE\n");
-    }
-    MPI_Barrier(MPI_COMM_WORLD);
     
     free(depot_a);
     free(depot_d);

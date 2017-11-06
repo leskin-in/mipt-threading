@@ -9,7 +9,7 @@
  * @brief Message buffer for random numbers
  */
 struct randgen_msgbuf {
-    long type;  /// Message type (always set to 0)
+    long type;  /// Message type (is always 1)
     double number;  /// Uniformly distributed at [0.0; 1.0) random number
 };
 
@@ -33,6 +33,10 @@ int randgen_supplier_status;
 
 
 void* randgen_supplier(void* context) {
+    if (context != NULL) {
+        return NULL;
+    }
+    
     struct msqid_ds qid_rand_supply_info;
     struct randgen_msgbuf buffer;
     buffer.type = 1;
@@ -52,6 +56,7 @@ void* randgen_supplier(void* context) {
              i < randgen_buffer_size - qid_rand_supply_info.msg_qnum;
              i++) {
             buffer.number = drand48();
+            msgsnd(randgen_qid, &buffer, sizeof(struct randgen_msgbuf), 0);
         }
     }
     
@@ -114,6 +119,7 @@ void randgen_stop(void) {
     
     pthread_join(randgen_supplier_tid, NULL);
     msgctl(randgen_qid, IPC_RMID, NULL);
+    errno = 0;
     
     randgen_buffer_size = -1;
 }
