@@ -519,7 +519,8 @@ int main(int argc, char** argv) {
             return -1;
         }
         
-        if (randgen_init(QUEUE_RAND_NORMAL_LENGTH) < 0) {
+        if (randgen_init(QUEUE_RAND_NORMAL_LENGTH,
+                         (unsigned int)mpi_rank) < 0) {
             fprintf(stderr, "Random number generator cannot be launched\n");
             return -1;
         }

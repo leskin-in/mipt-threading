@@ -13,11 +13,12 @@
 /**
  * @brief Start randgen thread
  * @param buffer_size Total number of pre-generated numbers stored in memory
+ * @param eseed Special value which will make random generator more random
  *
  * @return 0 if successful
  * @return -1 for errors
  */
-int randgen_init(unsigned int buffer_size);
+int randgen_init(unsigned int buffer_size, unsigned int eseed);
 
 
 /**

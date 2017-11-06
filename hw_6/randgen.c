@@ -41,8 +41,6 @@ void* randgen_supplier(void* context) {
     struct randgen_msgbuf buffer;
     buffer.type = 1;
     
-    srand48((long)time(NULL));
-    
     while (1) {
         pthread_mutex_lock(&randgen_supplier_lock);
         if (randgen_supplier_status == -1) {
@@ -66,7 +64,7 @@ void* randgen_supplier(void* context) {
 
 
 
-int randgen_init(unsigned int buffer_size) {
+int randgen_init(unsigned int buffer_size, unsigned int eseed) {
     if ((randgen_buffer_size != -1) || (buffer_size == 0)) {
         return -1;
     }
@@ -77,6 +75,8 @@ int randgen_init(unsigned int buffer_size) {
         randgen_buffer_size = -1;
         return -1;
     }
+    
+    srand48((long)time(NULL) + (long)eseed * 256);
     
     randgen_supplier_status = 0;
     
