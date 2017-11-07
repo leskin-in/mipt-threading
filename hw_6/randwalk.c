@@ -1,8 +1,6 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/ipc.h>
-#include <sys/msg.h>
 #include <mpi.h>
 #include <pthread.h>
 #include <sys/time.h>
@@ -51,13 +49,6 @@ int Mpi_rank;
 
 /// Global MPI_Datatype for the PARTICLE struct
 MPI_Datatype PARTICLE_mpi_t;
-
-
-/// System V queue ID for the sender thread
-
-
-/// System V queue ID for the receiver thread
-
 
 
 pthread_t Thread_processor_tid;
