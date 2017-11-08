@@ -767,6 +767,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < Base_l * Base_l; i++) {
             free(particle_positions[i]);
         }
+        free(particle_positions);
     }
     
     
