@@ -5,7 +5,6 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "lock_queue.h"
 #include "lock_queue_2.h"
@@ -251,6 +250,38 @@ long get_sector_with_offset(const PARTICLE* unit, long current_sector) {
 
 
 /**
+ * @brief Get position of a particle in in-sector array
+ * @param unit The particle
+ * @return position of a particle in in-sector array
+ */
+int get_position_in_sector(const PARTICLE* unit) {
+    long sector = get_sector(unit);
+    long x_min = Base_l * (sector % Base_a);
+    long y_min = Base_l * (sector / Base_a);
+    long x_ins = unit ->x - x_min;
+    long y_ins = unit ->y - y_min;
+    return (int)(y_ins * Base_l + x_ins);
+}
+
+
+
+/**
+ * @brief Get global particle position ("line" in 'data.bin')
+ * @param sector Sector the particle belongs to
+ * @param in_sector_position Position of the particle in in-sector array
+ * @return global particle position in out file
+ */
+int get_position_global(int sector, int in_sector_position) {
+    long x_min = Base_l * (sector % Base_a);
+    long y_min = Base_l * (sector / Base_a);
+    long x_ins = in_sector_position % Base_l;
+    long y_ins = in_sector_position / Base_l;
+    return (int)((y_min + y_ins) * Base_l * Base_a + (x_min + x_ins));
+}
+
+
+
+/**
  * @brief Add a patricle to 'depot_a'
  * @return 0 if successful
  */
@@ -423,8 +454,6 @@ void* thread_processor(void* context) {
     
     pthread_mutex_unlock(&Thread_processor_lock);
     
-    sleep(5);
-    
     return NULL;
 }
 
@@ -518,7 +547,7 @@ int main(int argc, char** argv) {
     
     // Prepare particles of this sector //
     {
-        srand48((long)time(NULL));
+        srand48((long)time(NULL) + (Mpi_rank * 10));
         
         Depot_a_length = (int)Base_N;
         Depot_a_memory_length = 1;
@@ -683,31 +712,61 @@ int main(int argc, char** argv) {
     
     // Output //
     {
-        unsigned int particle_absolute_distribution[Mpi_size];
-        for (int i = 0; i < Mpi_size; i++) {
-            particle_absolute_distribution[i] = 0;
+        unsigned int** particle_positions = malloc(sizeof(unsigned int**)
+                                                   * Base_l * Base_l);
+        MPI_Request* requests = malloc(sizeof(MPI_Request) * Base_l * Base_l);
+        
+        for (int i = 0; i < Base_l * Base_l; i++) {
+            particle_positions[i] = malloc(sizeof(unsigned int) * Mpi_size);
+            for (int j = 0; j < Mpi_size; j++) {
+                particle_positions[i][j] = 0;
+            }
         }
         
         for (int i = 0; i < Depot_d_length; i++) {
-            particle_absolute_distribution[Depot_d[i].origin_sector] += 1;
+            particle_positions[
+                get_position_in_sector(&Depot_d[i])
+            ][
+                Depot_d[i].origin_sector
+            ] += 1;
         }
         
         MPI_File datafile;
         MPI_File_open(MPI_COMM_WORLD,
-                      "./data.bin", MPI_MODE_CREATE | MPI_MODE_WRONLY,
+                      "./data.bin", MPI_MODE_CREATE | MPI_MODE_RDWR,
                       MPI_INFO_NULL, &datafile);
         
         MPI_Aint dummy;
         MPI_Aint offset;
         MPI_Type_get_extent(MPI_UNSIGNED, &dummy, &offset);
         
-        MPI_File_write_ordered(datafile,
-                               particle_absolute_distribution,
-                               Mpi_size, MPI_UNSIGNED,
-                               MPI_STATUS_IGNORE);
+        MPI_Offset file_offset = offset * Mpi_size *
+                                 Base_l * Base_l * Base_a * Base_b;
+        
+        MPI_Barrier(MPI_COMM_WORLD);
+        MPI_File_preallocate(datafile, file_offset);
+        MPI_File_set_size(datafile, file_offset);
+        MPI_Barrier(MPI_COMM_WORLD);
+        
+        for (int i = 0; i < Base_l * Base_l; i++) {
+            MPI_File_seek(datafile,
+                          get_position_global(Mpi_rank, i) * Mpi_size * offset,
+                          MPI_SEEK_SET);
+            MPI_File_iwrite(datafile,
+                            particle_positions[i], Mpi_size, MPI_UNSIGNED,
+                            &requests[i]);
+        }
+        for (int i = 0; i < Base_l * Base_l; i++) {
+            MPI_Wait(&requests[i], MPI_STATUS_IGNORE);
+        }
         
         MPI_Barrier(MPI_COMM_WORLD);
         MPI_File_close(&datafile);
+        
+        free(requests);
+        for (int i = 0; i < Base_l * Base_l; i++) {
+            free(particle_positions[i]);
+        }
     }
     
     
@@ -717,6 +776,5 @@ int main(int argc, char** argv) {
     MPI_Finalize();
     return 0;
 }
-
 
 
